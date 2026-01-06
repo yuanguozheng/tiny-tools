@@ -19,6 +19,40 @@
     .log { margin-top: 14px; white-space: pre-wrap; background: #0b0b0b; color: #eaeaea; padding: 12px; border-radius: 10px; font-size: 12px; }
     .hint { color: #666; font-size: 13px; margin-top: 8px; line-height: 1.4; }
     .align-bottom { align-self: end; }
+    .loading {
+      position: fixed;
+      inset: 0;
+      background: rgba(255, 255, 255, 0.78);
+      backdrop-filter: blur(2px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+    }
+    .loading.hidden { display: none; }
+    .loading-card {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 18px;
+      border-radius: 12px;
+      border: 1px solid #ddd;
+      background: #fff;
+      color: #222;
+      font-size: 14px;
+      box-shadow: 0 10px 26px rgba(0, 0, 0, 0.12);
+    }
+    .spinner {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: 3px solid #d0d0d0;
+      border-top-color: #222;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body>
@@ -53,6 +87,13 @@
 
   <div id="log" class="log">等待选择 PDF…</div>
 
+  <div id="loading" class="loading hidden" aria-live="polite" aria-busy="true">
+    <div class="loading-card">
+      <div class="spinner" aria-hidden="true"></div>
+      <div id="loading-text">处理中…</div>
+    </div>
+  </div>
+
   <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
   <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
   <script>
@@ -62,6 +103,8 @@
     const logEl = document.getElementById('log');
     const rangesEl = document.getElementById('ranges');
     const autoAllEl = document.getElementById('auto-all');
+    const loadingEl = document.getElementById('loading');
+    const loadingTextEl = document.getElementById('loading-text');
 
     let currentFile = null;
     let currentPdfBytes = null;
@@ -70,6 +113,12 @@
 
     function log(msg) {
       logEl.textContent = msg;
+    }
+
+    function setLoading(active, message) {
+      if (message) loadingTextEl.textContent = message;
+      loadingEl.classList.toggle('hidden', !active);
+      loadingEl.setAttribute('aria-busy', active ? 'true' : 'false');
     }
 
     function parseRanges(input, maxPage) {
@@ -115,17 +164,25 @@
       if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
         throw new Error('请选择 PDF 文件');
       }
-      currentFile = file;
-      currentPdfBytes = new Uint8Array(await file.arrayBuffer());
-      const pdfDoc = await PDFLib.PDFDocument.load(currentPdfBytes, { ignoreEncryption: false });
-      pageCount = pdfDoc.getPageCount();
-      splitBtn.disabled = false;
-      rangesEl.disabled = autoAllEl.checked;
-      log(`已加载：${file.name}\n总页数：${pageCount}`);
-      if (autoAllEl.checked) {
-        await splitPdf();
-      } else {
+      setLoading(true, '正在读取 PDF…');
+      try {
+        currentFile = file;
+        currentPdfBytes = new Uint8Array(await file.arrayBuffer());
+        const pdfDoc = await PDFLib.PDFDocument.load(currentPdfBytes, { ignoreEncryption: false });
+        pageCount = pdfDoc.getPageCount();
+        splitBtn.disabled = false;
+        rangesEl.disabled = autoAllEl.checked;
+        log(`已加载：${file.name}\n总页数：${pageCount}`);
+        if (autoAllEl.checked) {
+          await splitPdf();
+          return;
+        }
         log(`已加载：${file.name}\n总页数：${pageCount}\n请确认范围后点击“开始拆分并下载 ZIP”。`);
+      } catch (err) {
+        setLoading(false);
+        throw err;
+      } finally {
+        if (!autoAllEl.checked) setLoading(false);
       }
     }
 
@@ -133,6 +190,7 @@
       if (!currentPdfBytes) return;
 
       splitBtn.disabled = true;
+      setLoading(true, '正在拆分并打包 ZIP…');
       try {
         const srcDoc = await PDFLib.PDFDocument.load(currentPdfBytes, { ignoreEncryption: false });
         const maxPage = srcDoc.getPageCount();
@@ -173,6 +231,7 @@
         log(`失败：${e?.message || String(e)}`);
       } finally {
         splitBtn.disabled = false;
+        setLoading(false);
       }
     }
 
