@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>本地 PDF 拆分页（纯前端，不上传）</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 24px; min-height: 100vh; }
+    .drop {
+      border: 2px dashed #999; border-radius: 12px; padding: 28px;
+      text-align: center; color: #444; background: #fafafa;
+    }
+    .drop.dragover { border-color: #333; background: #f0f0f0; }
+    .row { margin-top: 16px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .check { display: inline-flex; gap: 8px; align-items: center; font-size: 13px; color: #333; }
+    button { padding: 8px 14px; border-radius: 10px; border: 1px solid #999; background: white; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    input[type="text"] { padding: 10px 12px; border-radius: 10px; border: 1px solid #999; width: 220px; }
+    .log { margin-top: 14px; white-space: pre-wrap; background: #0b0b0b; color: #eaeaea; padding: 12px; border-radius: 10px; font-size: 12px; }
+    .hint { color: #666; font-size: 13px; margin-top: 8px; line-height: 1.4; }
+    .align-bottom { align-self: end; }
+  </style>
+</head>
+<body>
+  <h2>PDF 拆分</h2>
+
+  <div id="drop" class="drop">
+    把 PDF 拖到这里，或
+    <label style="text-decoration: underline; cursor: pointer;">
+      选择文件
+      <input id="file" type="file" accept="application/pdf" style="display:none" />
+    </label>
+    <div class="hint">
+      默认：拖到页面任意位置后自动按全部页拆分，并打包成 ZIP。<br/>
+      你也可以取消自动选项，在下面输入页码范围（例如：1-3,5,8-10）。
+    </div>
+  </div>
+
+  <div class="row">
+    <label class="check">
+      <input id="auto-all" type="checkbox" checked />
+      拖入后自动拆分全部页
+    </label>
+  </div>
+
+  <div class="row">
+    <div>
+      <div style="font-size: 13px; color: #333; margin-bottom: 6px;">页码范围（可选）</div>
+      <input id="ranges" type="text" placeholder="例如：1-3,5,8-10" />
+    </div>
+    <button id="split" class="align-bottom" disabled>开始拆分并下载 ZIP</button>
+  </div>
+
+  <div id="log" class="log">等待选择 PDF…</div>
+
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script>
+    const drop = document.getElementById('drop');
+    const fileInput = document.getElementById('file');
+    const splitBtn = document.getElementById('split');
+    const logEl = document.getElementById('log');
+    const rangesEl = document.getElementById('ranges');
+    const autoAllEl = document.getElementById('auto-all');
+
+    let currentFile = null;
+    let currentPdfBytes = null;
+    let pageCount = 0;
+    rangesEl.disabled = autoAllEl.checked;
+
+    function log(msg) {
+      logEl.textContent = msg;
+    }
+
+    function parseRanges(input, maxPage) {
+      const s = (input || '').trim();
+      if (!s) return null; // null 表示按单页拆全部
+      const parts = s.split(',').map(x => x.trim()).filter(Boolean);
+      const pages = new Set();
+      for (const p of parts) {
+        const m = p.match(/^(\d+)\s*-\s*(\d+)$/);
+        if (m) {
+          let a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+          if (a > b) [a, b] = [b, a];
+          for (let i = a; i <= b; i++) {
+            if (i >= 1 && i <= maxPage) pages.add(i);
+          }
+          continue;
+        }
+        const n = p.match(/^\d+$/);
+        if (n) {
+          const i = parseInt(p, 10);
+          if (i >= 1 && i <= maxPage) pages.add(i);
+          continue;
+        }
+        throw new Error(`无法识别的范围片段：${p}`);
+      }
+      if (pages.size === 0) throw new Error('页码范围为空或全部超出范围');
+      return Array.from(pages).sort((a, b) => a - b);
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    async function loadPdf(file) {
+      if (!file) return;
+      if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+        throw new Error('请选择 PDF 文件');
+      }
+      currentFile = file;
+      currentPdfBytes = new Uint8Array(await file.arrayBuffer());
+      const pdfDoc = await PDFLib.PDFDocument.load(currentPdfBytes, { ignoreEncryption: false });
+      pageCount = pdfDoc.getPageCount();
+      splitBtn.disabled = false;
+      rangesEl.disabled = autoAllEl.checked;
+      log(`已加载：${file.name}\n总页数：${pageCount}`);
+      if (autoAllEl.checked) {
+        await splitPdf();
+      } else {
+        log(`已加载：${file.name}\n总页数：${pageCount}\n请确认范围后点击“开始拆分并下载 ZIP”。`);
+      }
+    }
+
+    async function splitPdf() {
+      if (!currentPdfBytes) return;
+
+      splitBtn.disabled = true;
+      try {
+        const srcDoc = await PDFLib.PDFDocument.load(currentPdfBytes, { ignoreEncryption: false });
+        const maxPage = srcDoc.getPageCount();
+
+        const rangeInput = autoAllEl.checked ? '' : rangesEl.value;
+        const pages = parseRanges(rangeInput, maxPage);
+        const baseName = (currentFile?.name || 'document.pdf').replace(/\.pdf$/i, '');
+
+        if (!autoAllEl.checked && !rangeInput.trim()) {
+          const confirmed = window.confirm('未填写范围，将按全部页拆分为 ZIP，是否继续？');
+          if (!confirmed) {
+            log('已取消，请填写页码范围后再试。');
+            return;
+          }
+        }
+
+        const selectedPages = pages || Array.from({ length: maxPage }, (_, i) => i + 1);
+        log(`开始拆分并打包 ZIP：共 ${selectedPages.length} 页…`);
+
+        const zip = new JSZip();
+        for (const p of selectedPages) {
+          const idx = p - 1;
+          const outDoc = await PDFLib.PDFDocument.create();
+          const [copied] = await outDoc.copyPages(srcDoc, [idx]);
+          outDoc.addPage(copied);
+          const outBytes = await outDoc.save();
+          const filename = `${baseName}-p${String(p).padStart(3, '0')}.pdf`;
+          zip.file(filename, outBytes);
+        }
+        const zipBlob = await zip.generateAsync({
+          type: 'blob',
+          compression: 'DEFLATE',
+          compressionOptions: { level: 6 }
+        });
+        downloadBlob(zipBlob, `${baseName}-split.zip`);
+        log(`完成：已打包为 ZIP 并触发下载（共 ${selectedPages.length} 个）。`);
+      } catch (e) {
+        log(`失败：${e?.message || String(e)}`);
+      } finally {
+        splitBtn.disabled = false;
+      }
+    }
+
+    function isFileDrag(e) {
+      return Array.from(e.dataTransfer?.types || []).includes('Files');
+    }
+
+    // Drag & Drop: allow anywhere on the page
+    let dragDepth = 0;
+    document.addEventListener('dragenter', (e) => {
+      if (!isFileDrag(e)) return;
+      dragDepth += 1;
+      drop.classList.add('dragover');
+      e.preventDefault();
+    });
+    document.addEventListener('dragover', (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+    });
+    document.addEventListener('dragleave', (e) => {
+      if (!isFileDrag(e)) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) drop.classList.remove('dragover');
+    });
+    document.addEventListener('drop', async (e) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      dragDepth = 0;
+      drop.classList.remove('dragover');
+      const file = e.dataTransfer.files?.[0];
+      if (!file) return;
+      try {
+        await loadPdf(file);
+      } catch (err) {
+        log(`加载失败：${err?.message || String(err)}`);
+      }
+    });
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      try {
+        await loadPdf(file);
+      } catch (err) {
+        log(`加载失败：${err?.message || String(err)}`);
+      }
+    });
+
+    splitBtn.addEventListener('click', splitPdf);
+
+    autoAllEl.addEventListener('change', () => {
+      rangesEl.disabled = autoAllEl.checked;
+      if (autoAllEl.checked) {
+        log('已开启自动拆分：下次拖入文件会直接打包 ZIP。');
+      } else if (currentFile) {
+        log(`已加载：${currentFile.name}\n总页数：${pageCount}\n请确认范围后点击“开始拆分并下载 ZIP”。`);
+      } else {
+        log('等待选择 PDF…');
+      }
+    });
+  </script>
+</body>
+</html>
